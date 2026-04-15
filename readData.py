@@ -1,7 +1,8 @@
 import pandas as pd
+from pathlib import Path
 
 
-
-data_path = 'fire_data/adj_factor.feather'
-data = pd.read_feather(data_path)
-data
+data_name = []
+base_dir = Path(__file__).parent / 'fire_data'
+for file_path in base_dir.iterdir():
+    data_name.append(file_path.relative_to(base_dir))
