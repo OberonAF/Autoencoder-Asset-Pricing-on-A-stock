@@ -1,5 +1,6 @@
 import torch
 from pathlib import Path
+from Data import read_character
 from Autoencoder import AutoencoderAssetPricing
 from Autoencoder import prepare_panel_data, train_autoencoder, predict_returns, extract_betas, compute_r2_oos
 from Plot import (
@@ -11,8 +12,6 @@ from Plot import (
 
 
 if __name__ == "__main__":
-    from character_data import read_character
-
     # ---- Configuration ----
     OUTPUT_DIR = Path(__file__).parent / "figures"
     OUTPUT_DIR.mkdir(exist_ok=True)

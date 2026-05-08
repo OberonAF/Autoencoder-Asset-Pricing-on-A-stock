@@ -2,7 +2,7 @@ import pandas as pd
 from pathlib import Path
 
 
-def read_character():
+def read_data():
     character_data = {}
     base_dir = Path(__file__).parent / 'fire_data'
     for file_path in base_dir.iterdir():
