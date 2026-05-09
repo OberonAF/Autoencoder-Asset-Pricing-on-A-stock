@@ -1,6 +1,6 @@
 import torch
 from pathlib import Path
-from Data import read_character
+from Data import read_data
 from Autoencoder import AutoencoderAssetPricing
 from Autoencoder import prepare_panel_data, train_autoencoder, predict_returns, extract_betas, compute_r2_oos
 from Plot import (
@@ -20,8 +20,7 @@ if __name__ == "__main__":
 
     # ---- Load & prepare data ----
     print("Loading data...")
-    char_data = read_character()
-    print(f"Loaded {len(char_data)} features.")
+    stock_code, date, char_data = read_data()
 
     print("Preparing panel data...")
     panel = prepare_panel_data(char_data, return_column="return_adj")
