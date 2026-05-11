@@ -101,6 +101,7 @@ class AutoencoderAssetPricing(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
+        self.hidden_dims = hidden_dims
         self.decoder_type = decoder_type
 
         self.encoder = Encoder(input_dim, hidden_dims, latent_dim, dropout, activation)
@@ -121,54 +122,6 @@ class AutoencoderAssetPricing(nn.Module):
         else:
             predicted = self.decoder(betas)
         return predicted, betas
-
-
-# ---------------------------------------------------------------------------
-# 3. Economic Restrictions (soft constraints)
-# ---------------------------------------------------------------------------
-
-class EconomicRestrictions:
-    """
-    Implements economic restrictions as soft penalty terms.
-
-    Restrictions from the paper:
-      - Beta Non-Negativity: factor loadings should be non-negative
-      - Beta Sum-to-One: for each stock, betas sum to 1 (if intercept included)
-      - Monotonicity: certain characteristics should have monotonic relationships
-        with betas (enforced via gradient penalty)
-    """
-
-    def __init__(self, enforce_nonneg: bool = True, enforce_sum_one: bool = False,
-                 monotonicity_weight: float = 0.0):
-        self.enforce_nonneg = enforce_nonneg
-        self.enforce_sum_one = enforce_sum_one
-        self.monotonicity_weight = monotonicity_weight
-
-    def penalty(self, betas: torch.Tensor) -> torch.Tensor:
-        penalty = torch.tensor(0.0, device=betas.device)
-        if self.enforce_nonneg:
-            penalty = penalty + torch.mean(torch.clamp(-betas, min=0) ** 2)
-        if self.enforce_sum_one:
-            penalty = penalty + torch.mean((betas.sum(dim=1) - 1.0) ** 2)
-        return penalty
-
-
-# ---------------------------------------------------------------------------
-# 4. Data Preprocessing
-# ---------------------------------------------------------------------------
-
-class StockDataset(Dataset):
-    """PyTorch Dataset for stock characteristics and returns."""
-
-    def __init__(self, X: torch.Tensor, R: torch.Tensor):
-        self.X = X
-        self.R = R
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.R[idx]
 
 
 def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
@@ -240,7 +193,7 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
 
 
 # ---------------------------------------------------------------------------
-# 5. Training
+# 3. Training
 # ---------------------------------------------------------------------------
 
 def train_autoencoder(model: AutoencoderAssetPricing,
@@ -250,8 +203,6 @@ def train_autoencoder(model: AutoencoderAssetPricing,
                       batch_size: int = 256,
                       lr: float = 1e-3,
                       weight_decay: float = 1e-5,
-                      restrictions: Optional[EconomicRestrictions] = None,
-                      restriction_weight: float = 0.01,
                       device: str = "cpu",
                       verbose: bool = True) -> Dict[str, list]:
     """
@@ -319,9 +270,6 @@ def train_autoencoder(model: AutoencoderAssetPricing,
                 mse = nn.functional.mse_loss(R_pred, R_batch)
                 loss = mse
 
-                if restrictions is not None and restriction_weight > 0:
-                    loss = loss + restriction_weight * restrictions.penalty(betas)
-
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -348,7 +296,7 @@ def train_autoencoder(model: AutoencoderAssetPricing,
 
 
 # ---------------------------------------------------------------------------
-# 6. Factor Extraction & Evaluation
+# 4. Factor Extraction & Evaluation
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -437,53 +385,60 @@ def compute_portfolio_performance(predictions: pd.DataFrame, n_deciles: int = 10
     return pd.DataFrame(results)
 
 
-# ---------------------------------------------------------------------------
-# 7. Hyperparameter Search (simple grid)
-# ---------------------------------------------------------------------------
+def rolling_window_predict(
+    model: AutoencoderAssetPricing,
+    panel_data: Dict[str, Tuple[torch.Tensor, torch.Tensor, StandardScaler, StandardScaler]],
+    min_train_size: int = 60,
+    n_epochs: int = 100,
+    batch_size: int = 256,
+    lr: float = 1e-3,
+    device: str = "cpu",
+    verbose: bool = True,
+) -> Tuple[pd.DataFrame, float]:
+    """
+    Expanding-window out-of-sample prediction.
 
-def grid_search(panel_data: Dict,
-                param_grid: List[dict],
-                n_epochs: int = 100,
-                device: str = "cpu",
-                verbose: bool = True) -> Tuple[AutoencoderAssetPricing, dict, dict]:
-    """Simple grid search over hyperparameters. Returns best model."""
-    best_model = None
-    best_loss = float("inf")
-    best_params = None
-    best_history = None
+    For each test period i (starting from min_train_size):
+      1. Train a fresh clone of `model` on periods 0 .. i-1
+      2. Predict returns for period i
 
-    input_dim = next(iter(panel_data.values()))[0].shape[1]
+    The passed-in `model` serves as a template (architecture, dropout, decoder_type);
+    each window creates a new AutoencoderAssetPricing with the same architecture.
 
-    for i, params in enumerate(param_grid):
+    Returns (oos_predictions_df, oos_r2).
+    """
+    dates = sorted(panel_data.keys())
+    device = torch.device(device)
+    all_preds = []
+
+    for i in range(min_train_size, len(dates)):
+        train_keys = dates[:i]
+        test_key = dates[i]
+        train_panel = {k: panel_data[k] for k in train_keys}
+        test_panel = {test_key: panel_data[test_key]}
+
         if verbose:
-            print(f"\n--- Trial {i + 1}/{len(param_grid)}: {params} ---")
+            print(f"Window {i - min_train_size + 1}/{len(dates) - min_train_size}: "
+                  f"train {train_keys[0]}..{train_keys[-1]} ({len(train_keys)} periods), "
+                  f"test {test_key}")
 
-        model = AutoencoderAssetPricing(
-            input_dim=input_dim,
-            hidden_dims=params.get("hidden_dims", [64, 32]),
-            latent_dim=params.get("latent_dim", 4),
-            dropout=params.get("dropout", 0.1),
-            activation=params.get("activation", "relu"),
-            decoder_type=params.get("decoder_type", "linear"),
+        # Fresh model with same architecture as template
+        m = AutoencoderAssetPricing(
+            input_dim=model.input_dim,
+            hidden_dims=model.hidden_dims,
+            latent_dim=model.latent_dim,
+            dropout=0.1,
+            decoder_type=model.decoder_type,
         )
+        train_autoencoder(m, train_panel, n_epochs=n_epochs,
+                          batch_size=batch_size, lr=lr, device=device, verbose=False)
+        preds = predict_returns(m, test_panel, device=device)
+        all_preds.append(preds)
 
-        history = train_autoencoder(
-            model, panel_data,
-            n_epochs=n_epochs,
-            batch_size=params.get("batch_size", 256),
-            lr=params.get("lr", 1e-3),
-            weight_decay=params.get("weight_decay", 1e-5),
-            device=device,
-            verbose=False,
-        )
-
-        final_loss = history["loss"][-1]
-        if final_loss < best_loss:
-            best_loss = final_loss
-            best_model = model
-            best_params = params
-            best_history = history
+    predictions = pd.concat(all_preds, ignore_index=True)
+    r2_oos = compute_r2_oos(predictions)
 
     if verbose:
-        print(f"\nBest params: {best_params}, Loss: {best_loss:.6f}")
-    return best_model, best_params, best_history
+        print(f"\nOOS R²: {r2_oos:.6f}")
+
+    return predictions, r2_oos

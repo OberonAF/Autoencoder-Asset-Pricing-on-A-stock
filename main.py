@@ -2,7 +2,10 @@ import torch
 from pathlib import Path
 from Data import read_data
 from Autoencoder import AutoencoderAssetPricing
-from Autoencoder import prepare_panel_data, train_autoencoder, predict_returns, extract_betas, compute_r2_oos
+from Autoencoder import (
+    prepare_panel_data, train_autoencoder, predict_returns,
+    extract_betas, compute_r2_oos, rolling_window_predict,
+)
 from Plot import (
     plot_beta_heatmap, plot_training_history, plot_decile_portfolio_returns,
     plot_comprehensive_report, plot_factor_returns, plot_r2_by_factor_count,
@@ -112,8 +115,34 @@ if __name__ == "__main__":
         save_path=str(OUTPUT_DIR / "07_r2_comparison.png"),
     )
 
+    
     # ================================================================
-    # 3. Summary
+    # 3. Rolling window (expanding) out-of-sample prediction
+    # ================================================================
+    print("\n" + "=" * 60)
+    print("Rolling window OOS prediction (K=4)")
+    print("=" * 60)
+
+    oos_template = AutoencoderAssetPricing(
+        input_dim=input_dim, hidden_dims=[64, 32], latent_dim=4,
+        dropout=0.1, decoder_type="linear",
+    )
+    preds_oos, r2_oos = rolling_window_predict(
+        oos_template, panel,
+        min_train_size=int(len(panel) * 0.6),
+        n_epochs=100, batch_size=256, lr=1e-3, device=DEVICE,
+    )
+
+    print("Plotting rolling window results...")
+    plot_decile_portfolio_returns(preds_oos, n_deciles=10,
+                                  title="Decile Portfolio — Rolling Window OOS (K=4)",
+                                  save_path=str(OUTPUT_DIR / "08_rolling_decile.png"))
+    plot_comprehensive_report(preds_oos, {"loss": [], "mse": []},
+                              title_prefix="Rolling Window OOS (K=4)",
+                              save_dir=str(OUTPUT_DIR))
+
+    # ================================================================
+    # Summary
     # ================================================================
     print(f"\nAll figures saved to: {OUTPUT_DIR}")
     print(f"Best K = {max(r2_by_k, key=r2_by_k.get)}, R² = {r2_by_k[max(r2_by_k, key=r2_by_k.get)]:.4f}")
