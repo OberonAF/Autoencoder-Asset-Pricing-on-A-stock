@@ -176,29 +176,14 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
                        time_periods: Optional[List[str]] = None
                        ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor, StandardScaler, StandardScaler]]:
     """
-    Prepare panel data for autoencoder training.
-
-    Each feather file contains a DataFrame with:
-      - index: stock_code
-      - columns: trade_date (string dates)
-      - values: feature/return values
-
-    Parameters
-    ----------
-    character_data : dict
-        Output of read_character() — dict mapping feature_name → DataFrame.
-    return_column : str
-        Key for the return data in character_data.
-    time_periods : list of str, optional
-        Subset of time periods to use (column names shared across files).
+    Build (X_t, R_{t+1}) pairs: use characteristics at t to predict returns at t+1.
 
     Returns
     -------
-    dict : time_period → (X_tensor, R_tensor, X_scaler, R_scaler)
+    dict : period_t → (X_t, R_{t+1}, X_scaler, R_scaler)
     """
     if return_column not in character_data:
         available = list(character_data.keys())
-        # Try common return names
         for cand in ["return_adj", "return", "close"]:
             if cand in character_data:
                 return_column = cand
@@ -209,33 +194,35 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
     returns_df = character_data[return_column]
     feature_dfs = {k: v for k, v in character_data.items() if k != return_column}
 
-    # Find common time periods across all DataFrames
-    ret_cols = set(returns_df.columns)
-    common_cols = ret_cols
+    common_cols = set(returns_df.index)
     for df in feature_dfs.values():
-        common_cols &= set(df.columns)
+        common_cols &= set(df.index)
 
     if time_periods is None:
         time_periods = sorted(common_cols)
 
     result = {}
-    for t in time_periods:
-        # Build feature matrix
+    for i, t in enumerate(time_periods):
+        if i + 1 >= len(time_periods):
+            continue  # last period has no t+1
+
         feature_list = []
-        for name, df in feature_dfs.items():
-            if t in df.columns:
-                feature_list.append(df[t].values.reshape(-1, 1))
+        for _, df in feature_dfs.items():
+            if t in df.index:
+                feature_list.append(df.loc[t].values.reshape(-1, 1))
         if not feature_list:
             continue
         X_raw = np.concatenate(feature_list, axis=1)
-        R_raw = returns_df[t].values.reshape(-1, 1)
 
-        # Drop rows with NaN
+        r_next = time_periods[i + 1]
+        if r_next not in returns_df.index:
+            continue
+        R_raw = returns_df.loc[r_next].values.reshape(-1, 1)
+
         valid = ~(np.isnan(X_raw).any(axis=1) | np.isnan(R_raw).any(axis=1))
         if valid.sum() < 10:
             continue
-        X_raw = X_raw[valid]
-        R_raw = R_raw[valid]
+        X_raw, R_raw = X_raw[valid], R_raw[valid]
 
         X_scaler = StandardScaler()
         R_scaler = StandardScaler()
@@ -269,6 +256,9 @@ def train_autoencoder(model: AutoencoderAssetPricing,
                       verbose: bool = True) -> Dict[str, list]:
     """
     Train the autoencoder across all time periods.
+
+    panel_data[t] = (X_t, R_{t+1}): use t-period characteristics
+    to predict t+1 returns. factor_returns[t] = F_{t+1}.
 
     Factor returns are learned jointly with the encoder.
     """
