@@ -131,6 +131,7 @@ if __name__ == "__main__":
         oos_template, panel,
         min_train_size=int(len(panel) * 0.6),
         n_epochs=100, batch_size=256, lr=1e-3, device=DEVICE,
+        factor_forecast="mean",
     )
 
     print("Plotting rolling window results...")

@@ -326,8 +326,16 @@ def extract_betas(model: AutoencoderAssetPricing,
 def predict_returns(model: AutoencoderAssetPricing,
                     panel_data: Dict[str, Tuple[torch.Tensor, torch.Tensor,
                                                 StandardScaler, StandardScaler]],
-                    device: str = "cpu") -> pd.DataFrame:
-    """Generate return predictions for evaluation."""
+                    device: str = "cpu",
+                    factor_returns: Optional[object] = None) -> pd.DataFrame:
+    """
+    Generate return predictions for evaluation.
+
+    For a linear decoder, `factor_returns` may be:
+      - None: use model.factor_returns_[t] learned during training
+      - a Tensor/array: use the same forecast factor for every period
+      - a dict: use factor_returns[t] for each requested period
+    """
     device = torch.device(device)
     model = model.to(device)
     model.eval()
@@ -336,7 +344,20 @@ def predict_returns(model: AutoencoderAssetPricing,
     for t, (X_t, R_t, _, R_scaler) in panel_data.items():
         X_t = X_t.to(device)
         if model.decoder_type == "linear":
-            f_t = model.factor_returns_[t].to(device)
+            if factor_returns is None:
+                if not hasattr(model, "factor_returns_") or t not in model.factor_returns_:
+                    raise KeyError(
+                        f"No factor return available for period {t}. "
+                        "Pass a forecast factor via factor_returns for out-of-sample periods."
+                    )
+                f_t = model.factor_returns_[t]
+            elif isinstance(factor_returns, dict):
+                if t not in factor_returns:
+                    raise KeyError(f"No forecast factor supplied for period {t}.")
+                f_t = factor_returns[t]
+            else:
+                f_t = factor_returns
+            f_t = torch.as_tensor(f_t, dtype=torch.float32, device=device)
             R_pred, _ = model(X_t, f_t)
         else:
             R_pred, _ = model(X_t)
@@ -355,6 +376,44 @@ def predict_returns(model: AutoencoderAssetPricing,
                 "actual": R_true_orig[i],
             })
     return pd.DataFrame(records)
+
+
+def forecast_factor_returns(
+    model: AutoencoderAssetPricing,
+    method: str = "mean",
+    train_keys: Optional[List[str]] = None,
+) -> torch.Tensor:
+    """
+    Forecast a factor-return vector for a new period using training-window factors.
+
+    This is intentionally simple and does not use test-period realized returns.
+    Supported methods:
+      - "mean": average factor return over the training window
+      - "last": last available training-window factor return
+      - "zero": zero factor return baseline
+    """
+    if model.decoder_type != "linear":
+        raise ValueError("Factor-return forecasts are only needed for linear decoders.")
+    if not hasattr(model, "factor_returns_") or not model.factor_returns_:
+        raise ValueError("Model has no learned factor_returns_. Train it first.")
+
+    available = model.factor_returns_
+    if train_keys is None:
+        keys = sorted(available.keys())
+    else:
+        keys = [key for key in train_keys if key in available]
+    if not keys:
+        raise ValueError("No factor returns are available for the requested training keys.")
+
+    factors = torch.stack([available[key].detach().cpu().float() for key in keys])
+    method = method.lower()
+    if method == "mean":
+        return factors.mean(dim=0)
+    if method == "last":
+        return factors[-1]
+    if method == "zero":
+        return torch.zeros_like(factors[0])
+    raise ValueError(f"Unknown factor forecast method: {method}")
 
 
 def compute_r2_oos(predictions: pd.DataFrame) -> float:
@@ -393,6 +452,7 @@ def rolling_window_predict(
     batch_size: int = 256,
     lr: float = 1e-3,
     device: str = "cpu",
+    factor_forecast: str = "mean",
     verbose: bool = True,
 ) -> Tuple[pd.DataFrame, float]:
     """
@@ -400,10 +460,15 @@ def rolling_window_predict(
 
     For each test period i (starting from min_train_size):
       1. Train a fresh clone of `model` on periods 0 .. i-1
-      2. Predict returns for period i
+      2. Forecast a test-period factor return from training-window factors
+      3. Predict returns for period i
 
     The passed-in `model` serves as a template (architecture, dropout, decoder_type);
     each window creates a new AutoencoderAssetPricing with the same architecture.
+
+    For linear decoders, `factor_forecast` controls how F_{t+1} is obtained
+    without realized test returns.  Supported values are "mean", "last", and
+    "zero"; see `forecast_factor_returns`.
 
     Returns (oos_predictions_df, oos_r2).
     """
@@ -432,7 +497,15 @@ def rolling_window_predict(
         )
         train_autoencoder(m, train_panel, n_epochs=n_epochs,
                           batch_size=batch_size, lr=lr, device=device, verbose=False)
-        preds = predict_returns(m, test_panel, device=device)
+        if m.decoder_type == "linear":
+            f_forecast = forecast_factor_returns(
+                m, method=factor_forecast, train_keys=train_keys
+            )
+            preds = predict_returns(
+                m, test_panel, device=device, factor_returns={test_key: f_forecast}
+            )
+        else:
+            preds = predict_returns(m, test_panel, device=device)
         all_preds.append(preds)
 
     predictions = pd.concat(all_preds, ignore_index=True)
