@@ -24,7 +24,8 @@ class Encoder(nn.Module):
     """Encoder network: maps characteristics X (N,P) to factor betas beta (N,K)."""
 
     def __init__(self, input_dim: int, hidden_dims: List[int], latent_dim: int,
-                 dropout: float = 0.1, activation: str = "relu"):
+                 dropout: float = 0.1, activation: str = "relu",
+                 beta_nonneg: bool = False):
         super().__init__()
         layers = []
         prev_dim = input_dim
@@ -40,6 +41,8 @@ class Encoder(nn.Module):
             layers.append(nn.Dropout(dropout))
             prev_dim = h_dim
         layers.append(nn.Linear(prev_dim, latent_dim))
+        if beta_nonneg:
+            layers.append(nn.Softplus())
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -96,14 +99,15 @@ class AutoencoderAssetPricing(nn.Module):
 
     def __init__(self, input_dim: int, hidden_dims: List[int], latent_dim: int,
                  dropout: float = 0.1, activation: str = "relu",
-                 decoder_type: str = "linear"):
+                 decoder_type: str = "linear", beta_nonneg: bool = False):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.hidden_dims = hidden_dims
         self.decoder_type = decoder_type
+        self.beta_nonneg = beta_nonneg
 
-        self.encoder = Encoder(input_dim, hidden_dims, latent_dim, dropout, activation)
+        self.encoder = Encoder(input_dim, hidden_dims, latent_dim, dropout, activation, beta_nonneg)
 
         if decoder_type == "linear":
             self.decoder = LinearDecoder(latent_dim)
@@ -428,6 +432,7 @@ def rolling_window_predict(
             latent_dim=model.latent_dim,
             dropout=0.1,
             decoder_type=model.decoder_type,
+            beta_nonneg=model.beta_nonneg
         )
         train_autoencoder(m, train_panel, n_epochs=n_epochs,
                           batch_size=batch_size, lr=lr, device=device, verbose=False)

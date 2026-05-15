@@ -43,7 +43,7 @@ print("=" * 60)
 
 model_k4 = AutoencoderAssetPricing(
     input_dim=input_dim, hidden_dims=[64, 32], latent_dim=4,
-    dropout=0.1, decoder_type="linear",
+    dropout=0.1, decoder_type="linear", beta_nonneg=True
 )
 history = train_autoencoder(model_k4, panel, n_epochs=200, batch_size=256,
                             lr=1e-3, device=DEVICE)
@@ -95,7 +95,7 @@ for K in range(1, 7):
     print(f"\n--- Training model K={K} ---")
     m = AutoencoderAssetPricing(
         input_dim=input_dim, hidden_dims=[64, 32], latent_dim=K,
-        dropout=0.1, decoder_type="linear",
+        dropout=0.1, decoder_type="linear", beta_nonneg=True
     )
     train_autoencoder(m, panel, n_epochs=150, batch_size=256,
                         lr=1e-3, device=DEVICE, verbose=False)
@@ -127,7 +127,7 @@ print("=" * 60)
 
 oos_template = AutoencoderAssetPricing(
     input_dim=input_dim, hidden_dims=[64, 32], latent_dim=4,
-    dropout=0.1, decoder_type="linear",
+    dropout=0.1, decoder_type="linear", beta_nonneg=True
 )
 preds_oos, r2_oos = rolling_window_predict(
     oos_template, panel,
