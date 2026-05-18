@@ -41,8 +41,9 @@ print("\n" + "=" * 60)
 print("Training baseline model (K=4)")
 print("=" * 60)
 
+hidden_dims = [32, 16, 8]
 model_k4 = AutoencoderAssetPricing(
-    input_dim=input_dim, hidden_dims=[64, 32], latent_dim=4,
+    input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=4,
     dropout=0.1, decoder_type="linear", beta_nonneg=True
 )
 history = train_autoencoder(model_k4, panel, n_epochs=200, batch_size=256,
@@ -91,10 +92,10 @@ print("Training models for K = 1, 2, 3, 4, 5, 6")
 print("=" * 60)
 
 r2_by_k = {}
-for K in range(1, 7):
+for K in range(1, 6):
     print(f"\n--- Training model K={K} ---")
     m = AutoencoderAssetPricing(
-        input_dim=input_dim, hidden_dims=[64, 32], latent_dim=K,
+        input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=K,
         dropout=0.1, decoder_type="linear", beta_nonneg=True
     )
     train_autoencoder(m, panel, n_epochs=150, batch_size=256,
@@ -126,7 +127,7 @@ print("Rolling window OOS prediction (K=4)")
 print("=" * 60)
 
 oos_template = AutoencoderAssetPricing(
-    input_dim=input_dim, hidden_dims=[64, 32], latent_dim=4,
+    input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=4,
     dropout=0.1, decoder_type="linear", beta_nonneg=True
 )
 preds_oos, r2_oos = rolling_window_predict(
