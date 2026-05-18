@@ -92,7 +92,7 @@ print("Training models for K = 1, 2, 3, 4, 5, 6")
 print("=" * 60)
 
 r2_by_k = {}
-for K in range(1, 6):
+for K in range(1, 7):
     print(f"\n--- Training model K={K} ---")
     m = AutoencoderAssetPricing(
         input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=K,
