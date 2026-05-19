@@ -328,15 +328,13 @@ def plot_r2_by_factor_count(
 def plot_comprehensive_report(
     predictions: pd.DataFrame,
     history: Dict[str, list],
-    model: Optional[AutoencoderAssetPricing] = None,
-    panel_data: Optional[Dict] = None,
     title_prefix: str = "Autoencoder Asset Pricing",
     save_dir: Optional[str] = None,
 ):
     """
     Generate a comprehensive set of evaluation plots in one figure.
 
-    Creates a 2×2 subplot layout:
+    Creates a 2x2 subplot layout:
       - Top-left: Decile average returns (bar)
       - Top-right: Training loss curve
       - Bottom-left: Predictive R² by decile
@@ -371,14 +369,20 @@ def plot_comprehensive_report(
     ax1.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
     ax1.grid(axis="y", alpha=0.3, zorder=0)
 
-    # Top-right: Training loss
+    # Top-right: Training loss or OOS placeholder
     ax2 = axes[0, 1]
-    epochs = range(1, len(history["loss"]) + 1)
-    ax2.plot(epochs, history["loss"], color="steelblue", linewidth=1.5)
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Loss")
-    ax2.set_title("Training Loss")
-    ax2.set_yscale("log")
+    if history and len(history.get("loss", [])) > 0:
+        epochs = range(1, len(history["loss"]) + 1)
+        ax2.plot(epochs, history["loss"], color="steelblue", linewidth=1.5)
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Loss")
+        ax2.set_title("Training Loss")
+        ax2.set_yscale("log")
+    else:
+        ax2.text(0.5, 0.5, "Out-of-Sample Prediction\n(No training history)",
+                 ha="center", va="center", transform=ax2.transAxes, fontsize=14, color="gray")
+        ax2.set_xticks([])
+        ax2.set_yticks([])
     ax2.grid(alpha=0.3)
 
     # Bottom-left: Time-series cumulative decile returns
@@ -416,9 +420,3 @@ def plot_comprehensive_report(
     if save_dir:
         fig.savefig(Path(save_dir) / "comprehensive_report.png")
     plt.show()
-
-    # Additional: factor returns plot (if available)
-    if model is not None and panel_data is not None and hasattr(model, "factor_returns_"):
-        plot_factor_returns(model, panel_data,
-                           title=f"{title_prefix} — Factor Returns",
-                           save_path=str(Path(save_dir) / "factor_returns.png") if save_dir else None)

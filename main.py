@@ -2,8 +2,8 @@
 import torch
 from pathlib import Path
 from Data import read_data
-from Autoencoder import AutoencoderAssetPricing
 from Autoencoder import (
+    AutoencoderAssetPricing,
     prepare_panel_data, train_autoencoder, predict_returns,
     extract_betas, compute_r2_oos, rolling_window_predict,
 )
@@ -16,8 +16,12 @@ from Plot import (
 
 
 # ---- Configuration ----
-OUTPUT_DIR = Path(__file__).parent / "figures"
-OUTPUT_DIR.mkdir(exist_ok=True)
+FIG_DIR = Path(__file__).parent / "figures"
+DIR1 = FIG_DIR / "task1_baseline"
+DIR2 = FIG_DIR / "task2_k_comparison"
+DIR3 = FIG_DIR / "task3_rolling_window"
+for d in [DIR1, DIR2, DIR3]:
+    d.mkdir(parents=True, exist_ok=True)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
 
@@ -25,12 +29,17 @@ print(f"Using device: {DEVICE}")
 print("Loading data...")
 stock_code, date, char_data = read_data()
 
-print("Preparing panel data...")
-panel = prepare_panel_data(char_data, return_column="return_adj")
-print(f"Prepared {len(panel)} time periods.")
+print("Preparing daily panel...")
+panel_daily = prepare_panel_data(char_data, return_column="return_adj", freq="D")
+print(f"Prepared {len(panel_daily)} daily periods.")
 
-sample_X = next(iter(panel.values()))[0]
+print("Preparing monthly panel...")
+panel_monthly = prepare_panel_data(char_data, return_column="return_adj", freq="M")
+print(f"Prepared {len(panel_monthly)} monthly periods.")
+
+sample_X = next(iter(panel_daily.values()))[0]
 input_dim = sample_X.shape[1]
+hidden_dims = [32, 16]
 print(f"Input dimension (P): {input_dim}")
 
 #%%
@@ -38,50 +47,49 @@ print(f"Input dimension (P): {input_dim}")
 # 1. Train a single model & generate all standard plots
 # ================================================================
 print("\n" + "=" * 60)
-print("Training baseline model (K=4)")
+print("Training baseline model (K=4) — daily data")
 print("=" * 60)
 
-hidden_dims = [32, 16, 8]
 model_k4 = AutoencoderAssetPricing(
     input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=4,
     dropout=0.1, decoder_type="linear", beta_nonneg=True
 )
-history = train_autoencoder(model_k4, panel, n_epochs=200, batch_size=256,
+history = train_autoencoder(model_k4, panel_daily, n_epochs=200, batch_size=256,
                             lr=1e-3, device=DEVICE)
 
-preds = predict_returns(model_k4, panel, device=DEVICE)
-betas_df = extract_betas(model_k4, panel, device=DEVICE)
+preds = predict_returns(model_k4, panel_daily, device=DEVICE)
+betas_df = extract_betas(model_k4, panel_daily, device=DEVICE)
 r2_full = compute_r2_oos(preds)
 print(f"\nFull-sample R²: {r2_full:.4f}")
 
 # ---- Figure 1: Training loss curve ----
 print("Plotting training history...")
 plot_training_history(history, title="Training Loss — Autoencoder (K=4)",
-                        save_path=str(OUTPUT_DIR / "01_training_loss.png"))
+                        save_path=str(DIR1 / "01_training_loss.png"))
 
 # ---- Figure 2: Decile portfolio bar + cumulative returns ----
 print("Plotting decile portfolio performance...")
 plot_decile_portfolio_returns(preds, n_deciles=10,
                                 title="Decile Portfolio — Autoencoder (K=4)",
-                                save_path=str(OUTPUT_DIR / "02_decile_portfolios.png"))
+                                save_path=str(DIR1 / "02_decile_portfolios.png"))
 
 # ---- Figure 3: Comprehensive 2×2 report ----
 print("Plotting comprehensive report...")
-plot_comprehensive_report(preds, history, model=model_k4, panel_data=panel,
-                            title_prefix="Autoencoder Asset Pricing (K=4)",
-                            save_dir=str(OUTPUT_DIR))
+plot_comprehensive_report(preds, history,
+                            title_prefix="Autoencoder Asset Pricing (K=4) — Daily",
+                            save_dir=str(DIR1))
 
 # ---- Figure 4: Factor returns time series ----
 print("Plotting factor returns...")
-plot_factor_returns(model_k4, panel,
+plot_factor_returns(model_k4, panel_daily,
                     title="Learned Factor Returns — Autoencoder (K=4)",
-                    save_path=str(OUTPUT_DIR / "04_factor_returns.png"))
+                    save_path=str(DIR1 / "04_factor_returns.png"))
 
 # ---- Figure 5: Beta heatmap ----
 print("Plotting beta heatmap...")
 plot_beta_heatmap(betas_df, n_stocks=50,
                     title="Factor Loadings Heatmap — Autoencoder (K=4)",
-                    save_path=str(OUTPUT_DIR / "05_beta_heatmap.png"))
+                    save_path=str(DIR1 / "05_beta_heatmap.png"))
 
 #%%
 # ================================================================
@@ -98,9 +106,9 @@ for K in range(1, 7):
         input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=K,
         dropout=0.1, decoder_type="linear", beta_nonneg=True
     )
-    train_autoencoder(m, panel, n_epochs=150, batch_size=256,
+    train_autoencoder(m, panel_daily, n_epochs=150, batch_size=256,
                         lr=1e-3, device=DEVICE, verbose=False)
-    p = predict_returns(m, panel, device=DEVICE)
+    p = predict_returns(m, panel_daily, device=DEVICE)
     r2_by_k[K] = compute_r2_oos(p)
     print(f"  K={K}: Predictive R² = {r2_by_k[K]:.4f}")
 
@@ -108,14 +116,14 @@ for K in range(1, 7):
 print("\nPlotting R² by factor count...")
 plot_r2_by_factor_count(r2_by_k,
                         title="Predictive R² vs Number of Factors",
-                        save_path=str(OUTPUT_DIR / "06_r2_by_k.png"))
+                        save_path=str(DIR2 / "06_r2_by_k.png"))
 
 # ---- Figure 7: R² comparison bar chart ----
 print("Plotting R² comparison...")
 plot_predictive_r2_comparison(
     r2_results={"Autoencoder": r2_by_k},
     title="Predictive R² — Autoencoder Across Factor Counts",
-    save_path=str(OUTPUT_DIR / "07_r2_comparison.png"),
+    save_path=str(DIR2 / "07_r2_comparison.png"),
 )
 
 #%%
@@ -131,22 +139,22 @@ oos_template = AutoencoderAssetPricing(
     dropout=0.1, decoder_type="linear", beta_nonneg=True
 )
 preds_oos, r2_oos = rolling_window_predict(
-    oos_template, panel,
-    min_train_size=int(len(panel) * 0.6),
+    oos_template, panel_monthly,
+    min_train_size=int(len(panel_monthly) * 0.6),
     n_epochs=100, batch_size=256, lr=1e-3, device=DEVICE,
 )
 
 print("Plotting rolling window results...")
 plot_decile_portfolio_returns(preds_oos, n_deciles=10,
                                 title="Decile Portfolio — Rolling Window OOS (K=4)",
-                                save_path=str(OUTPUT_DIR / "08_rolling_decile.png"))
+                                save_path=str(DIR3 / "08_rolling_decile.png"))
 plot_comprehensive_report(preds_oos, {"loss": [], "mse": []},
                             title_prefix="Rolling Window OOS (K=4)",
-                            save_dir=str(OUTPUT_DIR))
+                            save_dir=str(DIR3))
 
 #%%
 # ================================================================
 # Summary
 # ================================================================
-print(f"\nAll figures saved to: {OUTPUT_DIR}")
+print(f"\nAll figures saved to: {FIG_DIR}")
 print(f"Best K = {max(r2_by_k, key=r2_by_k.get)}, R² = {r2_by_k[max(r2_by_k, key=r2_by_k.get)]:.4f}")

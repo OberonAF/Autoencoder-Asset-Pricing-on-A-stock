@@ -129,10 +129,16 @@ class AutoencoderAssetPricing(nn.Module):
 
 def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
                        return_column: str = "return_adj",
-                       time_periods: Optional[List[str]] = None
+                       time_periods: Optional[List[str]] = None,
+                       freq: str = 'D'
                        ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor, StandardScaler, StandardScaler]]:
     """
     Build (X_t, R_{t+1}) pairs: use characteristics at t to predict returns at t+1.
+
+    Parameters
+    ----------
+    freq : str
+        'D' = daily (default), 'M' = month-end. Resamples dates to given frequency.
 
     Returns
     -------
@@ -156,6 +162,13 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
 
     if time_periods is None:
         time_periods = sorted(common_cols)
+
+    # Resample to target frequency
+    if freq == "M":
+        date_series = pd.to_datetime(pd.Series(time_periods))
+        month_groups = date_series.dt.to_period("M")
+        keep_idx = month_groups.drop_duplicates(keep="last").index
+        time_periods = [time_periods[i] for i in keep_idx]
 
     result = {}
     for i, t in enumerate(time_periods):
@@ -337,14 +350,24 @@ def predict_returns(model: AutoencoderAssetPricing,
 
     records = []
     for t, (X_t, R_t, _, R_scaler) in panel_data.items():
-        X_t = X_t.to(device)
+        X_t_dev = X_t.to(device)
+        R_t_dev = R_t.to(device)
+        betas = model.encoder(X_t_dev)
+
         if model.decoder_type == "linear":
-            f_t = model.factor_returns_[t].to(device)
-            R_pred, _ = model(X_t, f_t)
+            if t in model.factor_returns_:
+                f_t = model.factor_returns_[t].to(device)
+            else:
+                # OOS period: estimate F_t via cross-sectional OLS  F = (β'β)⁻¹β'R
+                B = betas                      # (N, K)
+                R = R_t_dev                    # (N,)
+                G = B.T @ B                    # (K, K)
+                rhs = B.T @ R                  # (K,)
+                f_t = torch.linalg.solve(G, rhs)
+            R_pred = (betas @ f_t).cpu().numpy()
         else:
-            R_pred, _ = model(X_t)
-        R_pred = R_pred.cpu().numpy()
-        R_true = R_t.cpu().numpy()
+            R_pred = model.decoder(betas).cpu().numpy()
+        R_true = R_t_dev.cpu().numpy()
 
         # Inverse transform to original scale
         R_pred_orig = R_scaler.inverse_transform(R_pred.reshape(-1, 1)).ravel()
