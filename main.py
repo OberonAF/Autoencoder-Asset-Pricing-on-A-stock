@@ -141,7 +141,7 @@ oos_template = AutoencoderAssetPricing(
 preds_oos, r2_oos = rolling_window_predict(
     oos_template, panel_monthly,
     min_train_size=int(len(panel_monthly) * 0.6),
-    n_epochs=100, batch_size=256, lr=1e-3, device=DEVICE,
+    n_epochs=150, batch_size=256, lr=1e-3, device=DEVICE,
 )
 
 print("Plotting rolling window results...")
