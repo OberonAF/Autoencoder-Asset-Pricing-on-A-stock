@@ -130,7 +130,8 @@ class AutoencoderAssetPricing(nn.Module):
 def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
                        return_column: str = "return_adj",
                        time_periods: Optional[List[str]] = None,
-                       freq: str = 'D'
+                       freq: str = 'D',
+                       risk_free_rate: Optional[pd.DataFrame] = None,
                        ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor, StandardScaler, StandardScaler]]:
     """
     Build (X_t, R_{t+1}) pairs: use characteristics at t to predict returns at t+1.
@@ -144,14 +145,6 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
     -------
     dict : period_t → (X_t, R_{t+1}, X_scaler, R_scaler)
     """
-    if return_column not in character_data:
-        available = list(character_data.keys())
-        for cand in ["return_adj", "return", "close"]:
-            if cand in character_data:
-                return_column = cand
-                break
-        else:
-            raise KeyError(f"No return column found. Available: {available}")
 
     returns_df = character_data[return_column]
     feature_dfs = {k: v for k, v in character_data.items() if k != return_column}
@@ -163,18 +156,30 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
     if time_periods is None:
         time_periods = sorted(common_cols)
 
-    # Resample to target frequency
+    all_dates = time_periods
+
+    # Resample for monthly frequency
     if freq == "M":
-        date_series = pd.to_datetime(pd.Series(time_periods))
-        month_groups = date_series.dt.to_period("M")
-        keep_idx = month_groups.drop_duplicates(keep="last").index
-        time_periods = [time_periods[i] for i in keep_idx]
+        date_series = pd.to_datetime(pd.Series(all_dates))
+        month_period = date_series.dt.to_period("M")
+        # Map each month to its daily dates
+        month_to_dates: Dict[str, List[str]] = {}
+        for d, mp in zip(all_dates, month_period):
+            month_to_dates.setdefault(str(mp), []).append(d)
+        month_keys = sorted(month_to_dates.keys())
+        # Feature dates = last trading day of each month
+        feature_dates = [month_to_dates[k][-1] for k in month_keys]
+        rf_factor = 1.0 / 12   # annual rf → monthly
+    else:
+        feature_dates = all_dates
+        rf_factor = 1.0 / 252  # annual rf → daily
 
     result = {}
-    for i, t in enumerate(time_periods):
-        if i + 1 >= len(time_periods):
+    for i, t in enumerate(feature_dates):
+        if i + 1 >= len(feature_dates):
             continue  # last period has no t+1
 
+        # --- Features X_t: month-end snapshot ---
         feature_list = []
         for _, df in feature_dfs.items():
             if t in df.index:
@@ -183,10 +188,21 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
             continue
         X_raw = np.concatenate(feature_list, axis=1)
 
-        r_next = time_periods[i + 1]
-        if r_next not in returns_df.index:
-            continue
-        R_raw = returns_df.loc[r_next].values.reshape(-1, 1)
+        # --- Returns R_{t+1}: daily → cumulative over next month ---
+        if freq == "M":
+            next_dates = month_to_dates[month_keys[i + 1]]
+            R_daily = returns_df.loc[next_dates]
+            R_raw = ((1 + R_daily).prod(axis=0) - 1).values.reshape(-1, 1)
+        else:
+            r_next = feature_dates[i + 1]
+            if r_next not in returns_df.index:
+                continue
+            R_raw = returns_df.loc[r_next].values.reshape(-1, 1)
+
+        # Subtract risk-free rate to compute excess return
+        if risk_free_rate is not None:
+            rf_annual = risk_free_rate.loc[t].iloc[0]
+            R_raw = R_raw - rf_annual * rf_factor
 
         valid = ~(np.isnan(X_raw).any(axis=1) | np.isnan(R_raw).any(axis=1))
         if valid.sum() < 10:

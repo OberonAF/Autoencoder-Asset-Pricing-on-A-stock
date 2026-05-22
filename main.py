@@ -1,7 +1,7 @@
 #%%
 import torch
 from pathlib import Path
-from Data import read_data
+from Data import read_data, risk_free_rate
 from Autoencoder import (
     AutoencoderAssetPricing,
     prepare_panel_data, train_autoencoder, predict_returns,
@@ -9,7 +9,7 @@ from Autoencoder import (
 )
 from Plot import (
     plot_beta_heatmap, plot_training_history, plot_decile_portfolio_returns,
-    plot_comprehensive_report, plot_factor_returns, plot_r2_by_factor_count,
+    plot_factor_returns, plot_r2_by_factor_count,
     plot_predictive_r2_comparison
 )
 
@@ -28,13 +28,14 @@ print(f"Using device: {DEVICE}")
 # ---- Load & prepare data ----
 print("Loading data...")
 stock_code, date, char_data = read_data()
+rf = risk_free_rate()
 
 print("Preparing daily panel...")
-panel_daily = prepare_panel_data(char_data, return_column="return_adj", freq="D")
+panel_daily = prepare_panel_data(char_data, return_column="return_adj", freq="D", risk_free_rate=rf)
 print(f"Prepared {len(panel_daily)} daily periods.")
 
 print("Preparing monthly panel...")
-panel_monthly = prepare_panel_data(char_data, return_column="return_adj", freq="M")
+panel_monthly = prepare_panel_data(char_data, return_column="return_adj", freq="M", risk_free_rate=rf)
 print(f"Prepared {len(panel_monthly)} monthly periods.")
 
 sample_X = next(iter(panel_daily.values()))[0]
@@ -62,6 +63,9 @@ betas_df = extract_betas(model_k4, panel_daily, device=DEVICE)
 r2_full = compute_r2_oos(preds)
 print(f"\nFull-sample R²: {r2_full:.4f}")
 
+# Equal-weighted market benchmark (all stocks avg return per period)
+market_bench = preds.groupby("time")["actual"].mean()
+
 # ---- Figure 1: Training loss curve ----
 print("Plotting training history...")
 plot_training_history(history, title="Training Loss — Autoencoder (K=4)",
@@ -71,25 +75,20 @@ plot_training_history(history, title="Training Loss — Autoencoder (K=4)",
 print("Plotting decile portfolio performance...")
 plot_decile_portfolio_returns(preds, n_deciles=10,
                                 title="Decile Portfolio — Autoencoder (K=4)",
-                                save_path=str(DIR1 / "02_decile_portfolios.png"))
+                                save_path=str(DIR1 / "02_decile_portfolios.png"),
+                                benchmark_returns=market_bench)
 
-# ---- Figure 3: Comprehensive 2×2 report ----
-print("Plotting comprehensive report...")
-plot_comprehensive_report(preds, history,
-                            title_prefix="Autoencoder Asset Pricing (K=4) — Daily",
-                            save_dir=str(DIR1))
-
-# ---- Figure 4: Factor returns time series ----
+# ---- Figure 3: Factor returns time series ----
 print("Plotting factor returns...")
 plot_factor_returns(model_k4, panel_daily,
                     title="Learned Factor Returns — Autoencoder (K=4)",
-                    save_path=str(DIR1 / "04_factor_returns.png"))
+                    save_path=str(DIR1 / "03_factor_returns.png"))
 
-# ---- Figure 5: Beta heatmap ----
+# ---- Figure 4: Beta heatmap ----
 print("Plotting beta heatmap...")
 plot_beta_heatmap(betas_df, n_stocks=50,
                     title="Factor Loadings Heatmap — Autoencoder (K=4)",
-                    save_path=str(DIR1 / "05_beta_heatmap.png"))
+                    save_path=str(DIR1 / "04_beta_heatmap.png"))
 
 #%%
 # ================================================================
@@ -144,13 +143,13 @@ preds_oos, r2_oos = rolling_window_predict(
     n_epochs=150, batch_size=256, lr=1e-3, device=DEVICE,
 )
 
+market_bench_oos = preds_oos.groupby("time")["actual"].mean()
+
 print("Plotting rolling window results...")
 plot_decile_portfolio_returns(preds_oos, n_deciles=10,
                                 title="Decile Portfolio — Rolling Window OOS (K=4)",
-                                save_path=str(DIR3 / "08_rolling_decile.png"))
-plot_comprehensive_report(preds_oos, {"loss": [], "mse": []},
-                            title_prefix="Rolling Window OOS (K=4)",
-                            save_dir=str(DIR3))
+                                save_path=str(DIR3 / "08_rolling_decile.png"),
+                                benchmark_returns=market_bench_oos)
 
 #%%
 # ================================================================

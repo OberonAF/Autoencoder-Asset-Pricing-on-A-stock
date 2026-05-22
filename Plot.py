@@ -5,7 +5,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.colors import Normalize
-from pathlib import Path
 from typing import Dict, Optional
 from Autoencoder import AutoencoderAssetPricing
 
@@ -114,12 +113,12 @@ def plot_decile_portfolio_returns(
     n_deciles: int = 10,
     title: str = "Decile Portfolio Performance",
     save_path: Optional[str] = None,
+    benchmark_returns: Optional[pd.Series] = None,
+    benchmark_label: str = "Market",
 ):
     """
-    Cumulative returns of decile portfolios formed on predicted returns.
-
-    Left plot: bar chart of average return per decile.
-    Right plot: cumulative log returns over time per decile.
+    Left: bar chart of avg return per decile. Right: cumulative returns.
+    If benchmark_returns is provided, it is plotted as a dashed line.
     """
     # Sort each period into deciles
     df = predictions.copy()
@@ -140,7 +139,7 @@ def plot_decile_portfolio_returns(
     time_decile = df_deciles.groupby(["time", "decile"])["actual"].mean().unstack()
     time_decile = time_decile.sort_index()
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 5))
 
     # --- Left: Bar chart ---
     colors = plt.cm.RdYlGn(np.linspace(0.05, 0.95, n_deciles))
@@ -161,18 +160,40 @@ def plot_decile_portfolio_returns(
                 xytext=(n_deciles - 1, decile_avg.iloc[-1] * 100 + 0.02),
                 ha="center", fontsize=8, color="green")
 
-    # --- Right: Cumulative returns ---
+    # --- Center: Cumulative returns ---
     cum_ret = (1 + time_decile).cumprod()
     for d in range(n_deciles):
         ax2.plot(cum_ret.index, cum_ret[d].values, color=colors[d],
                  linewidth=1.2, label=f"D{d+1}" if d in [0, n_deciles - 1] else "",
                  alpha=0.7 if d not in [0, n_deciles - 1] else 1.0)
+    if benchmark_returns is not None:
+        bench_cum = (1 + benchmark_returns.sort_index()).cumprod()
+        ax2.plot(bench_cum.index, bench_cum.values, color="black",
+                 linewidth=1.5, linestyle="--", label=benchmark_label)
     ax2.legend(loc="upper left", framealpha=0.9)
     ax2.set_xlabel("Time Period")
     ax2.set_ylabel("Cumulative Return")
     ax2.set_title("Cumulative Decile Returns")
     ax2.grid(alpha=0.3)
     ax2.xaxis.set_major_locator(mticker.MaxNLocator(6))
+
+    # --- Right: D10 excess over benchmark (long-only with short-sale constraint) ---
+    if benchmark_returns is not None:
+        bench_cum = (1 + benchmark_returns.sort_index()).cumprod()
+        d10_excess = cum_ret[n_deciles - 1] / bench_cum - 1
+        color_excess = "green" if d10_excess.iloc[-1] > 0 else "red"
+        ax3.fill_between(range(len(d10_excess)), 0, d10_excess.values,
+                         color=color_excess, alpha=0.3)
+        ax3.plot(range(len(d10_excess)), d10_excess.values,
+                 color="darkgreen" if d10_excess.iloc[-1] > 0 else "darkred", linewidth=1.5)
+        ax3.set_title(f"D{n_deciles} vs {benchmark_label}\n(Long-Only Excess)")
+    else:
+        ax3.text(0.5, 0.5, "Need benchmark data", ha="center", va="center",
+                 transform=ax3.transAxes, fontsize=12, color="gray")
+    ax3.set_xlabel("Time Period")
+    ax3.set_ylabel("Cumulative Excess Return")
+    ax3.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
+    ax3.grid(alpha=0.3)
 
     fig.suptitle(title, fontsize=14, fontweight="bold")
     fig.tight_layout()
@@ -322,101 +343,4 @@ def plot_r2_by_factor_count(
     fig.tight_layout()
     if save_path:
         fig.savefig(save_path)
-    plt.show()
-
-
-def plot_comprehensive_report(
-    predictions: pd.DataFrame,
-    history: Dict[str, list],
-    title_prefix: str = "Autoencoder Asset Pricing",
-    save_dir: Optional[str] = None,
-):
-    """
-    Generate a comprehensive set of evaluation plots in one figure.
-
-    Creates a 2x2 subplot layout:
-      - Top-left: Decile average returns (bar)
-      - Top-right: Training loss curve
-      - Bottom-left: Predictive R² by decile
-      - Bottom-right: Cumulative decile returns
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-    df = predictions.copy()
-    n_deciles = 10
-    decile_frames = []
-    for _, grp in df.groupby("time"):
-        if len(grp) < n_deciles:
-            continue
-        grp = grp.copy()
-        grp["decile"] = pd.qcut(grp["predicted"], q=n_deciles, labels=False,
-                                duplicates="drop")
-        decile_frames.append(grp)
-    df_deciles = pd.concat(decile_frames)
-
-    decile_avg = df_deciles.groupby("decile")["actual"].mean()
-    colors = plt.cm.RdYlGn(np.linspace(0.05, 0.95, n_deciles))
-
-    # Top-left: Decile bar chart
-    ax1 = axes[0, 0]
-    ax1.bar(range(n_deciles), decile_avg.values * 100, color=colors,
-            edgecolor="black", linewidth=0.5, zorder=3)
-    ax1.set_xlabel("Predicted Return Decile")
-    ax1.set_ylabel("Avg Actual Return (%)")
-    ax1.set_title("Return by Decile (Low → High)")
-    ax1.set_xticks(range(n_deciles))
-    ax1.set_xticklabels(range(1, n_deciles + 1))
-    ax1.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
-    ax1.grid(axis="y", alpha=0.3, zorder=0)
-
-    # Top-right: Training loss or OOS placeholder
-    ax2 = axes[0, 1]
-    if history and len(history.get("loss", [])) > 0:
-        epochs = range(1, len(history["loss"]) + 1)
-        ax2.plot(epochs, history["loss"], color="steelblue", linewidth=1.5)
-        ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("Loss")
-        ax2.set_title("Training Loss")
-        ax2.set_yscale("log")
-    else:
-        ax2.text(0.5, 0.5, "Out-of-Sample Prediction\n(No training history)",
-                 ha="center", va="center", transform=ax2.transAxes, fontsize=14, color="gray")
-        ax2.set_xticks([])
-        ax2.set_yticks([])
-    ax2.grid(alpha=0.3)
-
-    # Bottom-left: Time-series cumulative decile returns
-    ax3 = axes[1, 0]
-    time_decile = df_deciles.groupby(["time", "decile"])["actual"].mean().unstack()
-    cum_ret = (1 + time_decile).cumprod()
-    for d in range(n_deciles):
-        ax3.plot(cum_ret.index, cum_ret[d].values, color=colors[d],
-                 linewidth=1.2 if d in [0, n_deciles - 1] else 0.6,
-                 alpha=0.8 if d in [0, n_deciles - 1] else 0.4)
-    ax3.set_title("Cumulative Decile Returns")
-    ax3.set_xlabel("Time")
-    ax3.set_ylabel("Cumulative Return")
-    ax3.legend(["D1 (Low)", f"D{n_deciles} (High)"], loc="upper left", framealpha=0.9)
-    ax3.grid(alpha=0.3)
-    ax3.xaxis.set_major_locator(mticker.MaxNLocator(6))
-
-    # Bottom-right: Long-short spread
-    ax4 = axes[1, 1]
-    spread_series = cum_ret[n_deciles - 1] / cum_ret[0] - 1
-    ax4.fill_between(range(len(spread_series)), 0, spread_series.values,
-                     color="green" if spread_series.iloc[-1] > 0 else "red",
-                     alpha=0.3)
-    ax4.plot(range(len(spread_series)), spread_series.values,
-             color="darkgreen" if spread_series.iloc[-1] > 0 else "darkred",
-             linewidth=1.5)
-    ax4.set_title(f"Long-Short Spread (D{n_deciles} - D1)")
-    ax4.set_xlabel("Time Period")
-    ax4.set_ylabel("Cumulative Spread")
-    ax4.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
-    ax4.grid(alpha=0.3)
-
-    fig.suptitle(title_prefix, fontsize=15, fontweight="bold")
-    fig.tight_layout()
-    if save_dir:
-        fig.savefig(Path(save_dir) / "comprehensive_report.png")
     plt.show()
