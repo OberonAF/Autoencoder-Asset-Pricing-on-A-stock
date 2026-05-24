@@ -120,8 +120,13 @@ def plot_decile_portfolio_returns(
     Left: bar chart of avg return per decile. Right: cumulative returns.
     If benchmark_returns is provided, it is plotted as a dashed line.
     """
-    # Sort each period into deciles
+    # z-score predictions within each date for cross-sectional rank
     df = predictions.copy()
+    df["predicted"] = df.groupby("time")["predicted"].transform(
+        lambda x: (x - x.mean()) / x.std(ddof=0) if x.std(ddof=0) > 1e-12 else 0.0
+    )
+
+    # Sort each period into deciles
     decile_frames = []
     for _, grp in df.groupby("time"):
         if len(grp) < n_deciles:
@@ -293,17 +298,40 @@ def plot_training_history(
     title: str = "Training History",
     save_path: Optional[str] = None,
 ):
-    """Plot MSE loss curve over epochs."""
-    fig, ax = plt.subplots(figsize=(8, 4))
+    """Plot training loss and validation Rank IC over epochs."""
     epochs = range(1, len(history["loss"]) + 1)
-    ax.plot(epochs, history["loss"], color="steelblue", linewidth=1.5, label="Training Loss")
-    ax.plot(epochs, history["mse"], color="darkorange", linewidth=1.0, alpha=0.6, label="MSE")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(alpha=0.3)
-    ax.set_yscale("log")
+    has_val = any(not np.isnan(v) for v in history.get("val_rank_ic", []))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4.5))
+
+    # Left: loss curve
+    ax1.plot(epochs, history["loss"], color="steelblue", linewidth=1.5, label="Training Loss")
+    ax1.plot(epochs, history["mse"], color="darkorange", linewidth=1.0, alpha=0.6, label="MSE")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title("Training Loss")
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+    ax1.set_yscale("log")
+
+    # Right: validation Rank IC
+    if has_val:
+        val_ic = history["val_rank_ic"]
+        ax2.plot(epochs, val_ic, color="steelblue", linewidth=1.5, label="Val Rank IC")
+        ax2.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
+        # Mark best epoch
+        best_idx = np.nanargmax(val_ic)
+        ax2.scatter(best_idx + 1, val_ic[best_idx], color="darkred", s=60, zorder=5,
+                    label=f"Best: epoch {best_idx + 1} ({val_ic[best_idx]:.4f})")
+        ax2.legend()
+        ax2.set_title("Validation Rank IC")
+    else:
+        ax2.text(0.5, 0.5, "No validation data", ha="center", va="center",
+                 transform=ax2.transAxes, fontsize=12, color="gray")
+    ax2.set_xlabel("Epoch")
+    ax2.grid(alpha=0.3)
+
+    fig.suptitle(title, fontsize=13, fontweight="bold")
     fig.tight_layout()
     if save_path:
         fig.savefig(save_path)
@@ -339,6 +367,48 @@ def plot_r2_by_factor_count(
     for k, r2 in zip(K_values, r2_values):
         ax.annotate(f"{r2:.3f}%", (k, r2), textcoords="offset points",
                     xytext=(0, -14), ha="center", fontsize=8, color="gray")
+
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path)
+    plt.show()
+
+
+def plot_predicted_vs_actual(
+    predictions: pd.DataFrame,
+    title: str = "Predicted vs Actual Returns",
+    save_path: Optional[str] = None,
+    max_points: int = 20000,
+):
+    """
+    Scatter plot of predicted vs actual returns, subsampled for readability.
+    """
+    df = predictions.sample(n=min(max_points, len(predictions)), random_state=0)
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(df["predicted"], df["actual"], s=2, alpha=0.2, color="steelblue")
+    ax.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
+    ax.axvline(x=0, color="black", linewidth=0.5, linestyle="--")
+
+    # y = x reference line
+    lim = max(abs(df["predicted"]).max(), abs(df["actual"]).max()) * 1.1
+    ax.plot([-lim, lim], [-lim, lim], color="darkred", linewidth=0.8, linestyle=":", label="y = x")
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+
+    ax.set_xlabel("Predicted Return")
+    ax.set_ylabel("Actual Return")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    # Annotate R² and Rank IC
+    from Autoencoder import compute_r2_oos, compute_rank_ic
+    r2 = compute_r2_oos(predictions)
+    ic = compute_rank_ic(predictions)
+    ax.text(0.05, 0.95, f"R² = {r2:.4f}\nRank IC = {ic:.4f}",
+            transform=ax.transAxes, va="top", fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
 
     fig.tight_layout()
     if save_path:

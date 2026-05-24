@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from scipy.stats import spearmanr
 from sklearn.preprocessing import StandardScaler
 from typing import Dict, Tuple, Optional, List
 
@@ -228,6 +229,11 @@ def prepare_panel_data(character_data: Dict[str, pd.DataFrame],
 # 3. Training
 # ---------------------------------------------------------------------------
 
+def _ema_last(frames: torch.Tensor, span: int = 120) -> torch.Tensor:
+    """Exponential moving average last value of a (T, K) tensor."""
+    ema = pd.DataFrame(frames.cpu().numpy()).ewm(span=span).mean().iloc[-1].values
+    return torch.tensor(ema, dtype=torch.float32)
+
 def train_autoencoder(model: AutoencoderAssetPricing,
                       panel_data: Dict[str, Tuple[torch.Tensor, torch.Tensor,
                                                   StandardScaler, StandardScaler]],
@@ -236,14 +242,20 @@ def train_autoencoder(model: AutoencoderAssetPricing,
                       lr: float = 1e-3,
                       weight_decay: float = 1e-5,
                       device: str = "cpu",
-                      verbose: bool = True) -> Dict[str, list]:
+                      verbose: bool = True,
+                      val_panel: Optional[Dict] = None) -> Dict[str, list]:
     """
     Train the autoencoder across all time periods.
 
     panel_data[t] = (X_t, R_{t+1}): use t-period characteristics
     to predict t+1 returns. factor_returns[t] = F_{t+1}.
 
-    Factor returns are learned jointly with the encoder.
+    Factor returns are learned jointly with the encoder. After training,
+    the time-series mean of factor returns is saved as model.factor_forecast_
+    for strict out-of-sample prediction.
+
+    If val_panel is provided, validation Rank IC is computed after each epoch
+    (stored in history["val_rank_ic"]).
     """
     device = torch.device(device)
     model = model.to(device)
@@ -266,7 +278,7 @@ def train_autoencoder(model: AutoencoderAssetPricing,
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.5)
 
-    history = {"loss": [], "mse": []}
+    history = {"loss": [], "mse": [], "val_rank_ic": []}
 
     for epoch in range(n_epochs):
         model.train()
@@ -317,13 +329,46 @@ def train_autoencoder(model: AutoencoderAssetPricing,
 
         scheduler.step(avg_loss)
 
+        # Validation Rank IC
+        if val_panel is not None and factor_returns:
+            all_f = torch.stack([fr.detach() for fr in factor_returns.values()])
+            f_forecast = _ema_last(all_f, span=120).to(device)
+            val_records = []
+            model.eval()
+            with torch.no_grad():
+                for t_val, (X_v, R_v, _, R_scaler_v) in val_panel.items():
+                    X_v = X_v.to(device)
+                    betas_v = model.encoder(X_v)
+                    R_pred_v = (betas_v @ f_forecast).cpu().numpy()
+                    R_true_v = R_v.numpy()
+                    R_pred_orig = R_scaler_v.inverse_transform(R_pred_v.reshape(-1, 1)).ravel()
+                    R_true_orig = R_scaler_v.inverse_transform(R_true_v.reshape(-1, 1)).ravel()
+                    for i in range(len(R_pred_orig)):
+                        val_records.append({
+                            "time": t_val, "predicted": R_pred_orig[i], "actual": R_true_orig[i]
+                        })
+            val_df = pd.DataFrame(val_records)
+            val_ic = compute_rank_ic(val_df)
+            history["val_rank_ic"].append(val_ic)
+        else:
+            history["val_rank_ic"].append(float("nan"))
+
         if verbose and (epoch + 1) % 20 == 0:
             lr_now = optimizer.param_groups[0]["lr"]
+            ic_str = f" | Val Rank IC: {history['val_rank_ic'][-1]:.4f}" if val_panel is not None else ""
             print(f"Epoch {epoch + 1:4d}/{n_epochs} | Loss: {avg_loss:.6f} | "
-                  f"MSE: {avg_mse:.6f} | LR: {lr_now:.2e}")
+                  f"MSE: {avg_mse:.6f} | LR: {lr_now:.2e}{ic_str}")
 
     # Store factor returns as part of model state
     model.factor_returns_ = {t: fr.detach().cpu() for t, fr in factor_returns.items()}
+
+    # EMA(120) last value of training factor returns for strict OOS forecast
+    if model.decoder_type == "linear" and factor_returns:
+        all_f = torch.stack([fr.detach() for fr in factor_returns.values()])  # (T, K)
+        model.factor_forecast_ = _ema_last(all_f, span=120)
+    else:
+        model.factor_forecast_ = None
+
     return history
 
 
@@ -359,7 +404,13 @@ def predict_returns(model: AutoencoderAssetPricing,
                     panel_data: Dict[str, Tuple[torch.Tensor, torch.Tensor,
                                                 StandardScaler, StandardScaler]],
                     device: str = "cpu") -> pd.DataFrame:
-    """Generate return predictions for evaluation."""
+    """
+    Generate return predictions.
+
+    For periods seen during training: use the learned factor returns F_t.
+    For OOS periods: use model.factor_forecast_ (time-series mean of training
+    factor returns) — strict forecast, no look-ahead.
+    """
     device = torch.device(device)
     model = model.to(device)
     model.eval()
@@ -374,12 +425,7 @@ def predict_returns(model: AutoencoderAssetPricing,
             if t in model.factor_returns_:
                 f_t = model.factor_returns_[t].to(device)
             else:
-                # OOS period: estimate F_t via cross-sectional OLS  F = (β'β)⁻¹β'R
-                B = betas                      # (N, K)
-                R = R_t_dev                    # (N,)
-                G = B.T @ B                    # (K, K)
-                rhs = B.T @ R                  # (K,)
-                f_t = torch.linalg.solve(G, rhs)
+                f_t = model.factor_forecast_.to(device)
             R_pred = (betas @ f_t).cpu().numpy()
         else:
             R_pred = model.decoder(betas).cpu().numpy()
@@ -404,6 +450,33 @@ def compute_r2_oos(predictions: pd.DataFrame) -> float:
     ss_res = ((predictions["actual"] - predictions["predicted"]) ** 2).sum()
     ss_tot = ((predictions["actual"] - predictions["actual"].mean()) ** 2).sum()
     return 1.0 - ss_res / ss_tot
+
+
+def compute_rank_ic(predictions: pd.DataFrame) -> float:
+    """Mean cross-sectional Rank IC (Spearman correlation per period)."""
+    ic_values = []
+    for t, grp in predictions.groupby("time"):
+        if len(grp) >= 10:
+            ic, _ = spearmanr(grp["predicted"], grp["actual"])
+            ic_values.append(ic)
+    return float(np.mean(ic_values)) if ic_values else float("nan")
+
+
+def shuffle_panel_returns(
+    panel_data: Dict[str, Tuple[torch.Tensor, torch.Tensor, StandardScaler, StandardScaler]],
+    seed: int = 0,
+) -> Dict[str, Tuple[torch.Tensor, torch.Tensor, StandardScaler, StandardScaler]]:
+    """
+    Within-date return permutation: shuffle R_{t+1} for each period independently,
+    breaking the link between characteristics and future returns while preserving
+    the cross-sectional return distribution.
+    """
+    rng = np.random.RandomState(seed)
+    shuffled = {}
+    for t, (X, R, X_scaler, R_scaler) in panel_data.items():
+        idx = rng.permutation(len(R))
+        shuffled[t] = (X.clone(), R[idx].clone(), X_scaler, R_scaler)
+    return shuffled
 
 
 def compute_portfolio_performance(predictions: pd.DataFrame, n_deciles: int = 10) -> pd.DataFrame:
@@ -438,14 +511,12 @@ def rolling_window_predict(
     verbose: bool = True,
 ) -> Tuple[pd.DataFrame, float]:
     """
-    Expanding-window out-of-sample prediction.
+    Expanding-window strict out-of-sample prediction.
 
     For each test period i (starting from min_train_size):
-      1. Train a fresh clone of `model` on periods 0 .. i-1
-      2. Predict returns for period i
-
-    The passed-in `model` serves as a template (architecture, dropout, decoder_type);
-    each window creates a new AutoencoderAssetPricing with the same architecture.
+      1. Train on periods 0 .. i-1
+      2. Predict period i using model.factor_forecast_ (historical-mean
+         factor returns, no look-ahead)
 
     Returns (oos_predictions_df, oos_r2).
     """
