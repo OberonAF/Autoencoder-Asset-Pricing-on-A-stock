@@ -206,7 +206,7 @@ oos_template = AutoencoderAssetPricing(
 )
 preds_oos, r2_oos = rolling_window_predict(
     oos_template, panel_monthly,
-    min_train_size=monthly_split,   # first 70% as minimum training size
+    min_train_size=monthly_split,   # first 50% as minimum training size
     n_epochs=150, batch_size=256, lr=1e-3, device=DEVICE,
 )
 print(f"Rolling window OOS R²: {r2_oos:.4f}  |  Rank IC: {compute_rank_ic(preds_oos):.4f}")
