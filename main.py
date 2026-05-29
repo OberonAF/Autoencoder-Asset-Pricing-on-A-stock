@@ -194,7 +194,7 @@ plot_predictive_r2_comparison(
 
 #%%
 # ================================================================
-# 4. Rolling window strict OOS on monthly data (60% train → 40% test)
+# 4. Rolling window strict OOS on monthly data (50% train → 50% test)
 # ================================================================
 print("\n" + "=" * 60)
 print("Task 4: Rolling window strict OOS on monthly data (K=4)")
